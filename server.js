@@ -4,22 +4,23 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const dotenv = require('dotenv');
 const { OpenAI } = require('openai');
-const franc = require('franc');
+const { franc } = require('franc');
 const langs = require('langs');
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
+const apikey = process.env.OPENAI_API_KEY;
 
 app.use(cors());
 app.use(bodyParser.json());
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
 const userSessions = {};
+
+const openai = new OpenAI({
+  apiKey: apikey
+});
 
 app.post('/chat', async (req, res) => {
   const { message, userId = 'default-user' } = req.body;
@@ -28,11 +29,11 @@ app.post('/chat', async (req, res) => {
     return res.status(400).json({ error: 'Message is required' });
   }
 
-  // Language detection
+  // ✅ Language detection (inside the POST route)
   const langCode = franc(message);
-  const language = langs.has(langCode) ? langs.where('3', langCode).name : 'unknown';
+  const language = langs.where('3', langCode)?.name || 'unknown';
 
-  // Store context
+  // ✅ Store context per user
   if (!userSessions[userId]) {
     userSessions[userId] = [];
   }
@@ -51,7 +52,7 @@ app.post('/chat', async (req, res) => {
 
     res.json({ reply, language });
   } catch (error) {
-    console.error('OpenAI error:', error);
+    console.error('OpenAI error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Failed to fetch AI response' });
   }
 });
