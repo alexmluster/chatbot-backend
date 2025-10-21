@@ -5,6 +5,11 @@ const dotenv = require('dotenv');
 const OpenAI = require('openai');     // default export in CJS
 const axios = require('axios');
 const cheerio = require('cheerio');
+const COMPLETIONS_MODEL = process.env.MODEL || 'gpt-4o-mini';
+// conversational but grounded
+const DEFAULT_TEMPERATURE = Number(process.env.TEMPERATURE ?? 0.45);
+const RESPONSE_TONE = process.env.RESPONSE_TONE || 'friendly, concise, professional';
+
 
 dotenv.config();
 
