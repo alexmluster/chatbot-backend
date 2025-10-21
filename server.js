@@ -167,7 +167,7 @@ async function retrieveDocs(query, k = 8) {
     .filter(r => r.score > 0.1);
 }
 
-// ---------- Conversational, grounded answering ----------
+//  Conversational, grounded answering 
 async function answerFromDocs(question, opts = {}) {
   const tone = opts.tone || RESPONSE_TONE;
 
