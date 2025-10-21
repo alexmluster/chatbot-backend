@@ -2,22 +2,24 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const OpenAI = require('openai');            // ✅ CommonJS style (not { OpenAI })
-const axios = require('axios');              // NEW: for fetching docs pages
-const cheerio = require('cheerio');          // NEW: for extracting text from HTML
+const OpenAI = require('openai');     // default export in CJS
+const axios = require('axios');
+const cheerio = require('cheerio');
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+// CORS: lock to your Netlify origins in prod via NETLIFY_ORIGINS env (comma-separated)
 app.use(cors({
-  // Lock this down in prod: set NETLIFY_ORIGINS="https://your-site.netlify.app,https://www.yourdomain.com"
-  origin: (process.env.NETLIFY_ORIGINS || '').split(',').filter(Boolean).length
-    ? (process.env.NETLIFY_ORIGINS || '').split(',').map(s => s.trim())
-    : true,
+  origin: (process.env.NETLIFY_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .concat((process.env.NETLIFY_ORIGINS ? [] : [true]))[0]   // true if not set
 }));
-app.use(express.json({ limit: '1mb' }));    // ✅ no need for body-parser
+app.use(express.json({ limit: '1mb' }));
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -26,29 +28,29 @@ const EMBEDDING_MODEL   = process.env.EMBEDDING_MODEL || 'text-embedding-3-small
 
 // ---------- Basic user sessions (trimmed) ----------
 const userSessions = new Map();
-const MAX_TURNS = 8; // keep last N pairs to cap token usage
+const MAX_TURNS = 8; // keep last N user/assistant pairs
 
 function pushToSession(userId, role, content) {
   if (!userSessions.has(userId)) userSessions.set(userId, []);
   const arr = userSessions.get(userId);
   arr.push({ role, content: String(content) });
-  // trim from the front if too long
-  while (arr.length > MAX_TURNS * 2) arr.splice(0, 2);
+  while (arr.length > MAX_TURNS * 2) arr.splice(0, 2); // trim oldest
   return arr;
 }
 
-// ========== DOCS-ONLY RAG (only the two Naviga manuals) ==========
-// Whitelist
-const DOC_BASES = [
+// ========== DOCS-ONLY RAG (strictly the two Naviga manuals) ==========
+// Hard whitelist (server-side enforcement)
+const DOC_BASES = Object.freeze([
   'https://docs.navigaglobal.com/circulation-setup-manual',
   'https://docs.navigaglobal.com/circulation-user-manual',
-];
-const MAX_PAGES   = Number(process.env.MAX_PAGES || 120);
-const CHUNK_SIZE  = Number(process.env.CHUNK_SIZE || 1100);
-const CHUNK_OVERLAP = Number(process.env.CHUNK_OVERLAP || 160);
+]);
 
-// In-memory index
-let RAG_INDEX = null; // [{url, title, text, embedding}...]
+const MAX_PAGES      = Number(process.env.MAX_PAGES || 120);
+const CHUNK_SIZE     = Number(process.env.CHUNK_SIZE || 1100);
+const CHUNK_OVERLAP  = Number(process.env.CHUNK_OVERLAP || 160);
+
+// In-memory index: [{ url, title, text, embedding }]
+let RAG_INDEX = null;
 
 function sameOriginPath(url, base) {
   try {
@@ -57,10 +59,10 @@ function sameOriginPath(url, base) {
     return u.origin === b.origin && u.pathname.startsWith(b.pathname);
   } catch { return false; }
 }
-function isDocLike(href='') {
-  return href &&
-    !href.startsWith('#') &&
-    !href.match(/\.(png|jpe?g|gif|svg|webp|ico|css|js|pdf|zip|mp4|mp3|woff2?)($|\?)/i);
+function isDocLike(href = '') {
+  return href
+    && !href.startsWith('#')
+    && !href.match(/\.(png|jpe?g|gif|svg|webp|ico|css|js|pdf|zip|mp4|mp3|woff2?)($|\?)/i);
 }
 function extractMainText(html) {
   const $ = cheerio.load(html);
@@ -73,7 +75,7 @@ function extractMainText(html) {
     const n = $(sel);
     if (n.length) { scope = n; break; }
   }
-  const parts = scope.find('h1,h2,h3,h4,h5,h6,p,li').map((_,el)=>$(el).text().trim()).get();
+  const parts = scope.find('h1,h2,h3,h4,h5,h6,p,li').map((_, el) => $(el).text().trim()).get();
   return parts.filter(Boolean).join('\n');
 }
 async function fetchPage(url) {
@@ -96,12 +98,12 @@ function chunkText(t, size = CHUNK_SIZE, overlap = CHUNK_OVERLAP) {
 function cosineSim(a, b) {
   let dot = 0, na = 0, nb = 0;
   const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
   return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
 }
 
 async function buildDocsIndex() {
-  // Crawl within the two path prefixes (one hop breadth-first, capped)
+  // Crawl within the two path prefixes (BFS, capped)
   const visited = new Set();
   const queue = [...DOC_BASES];
   const pages = [];
@@ -118,7 +120,9 @@ async function buildDocsIndex() {
         p.links
           .map(href => new URL(href, url).toString())
           .filter(h => isDocLike(h) && sameOriginPath(h, base))
-          .forEach(h => { if (!visited.has(h) && pages.length + queue.length < MAX_PAGES) queue.push(h); });
+          .forEach(h => {
+            if (!visited.has(h) && pages.length + queue.length < MAX_PAGES) queue.push(h);
+          });
       }
     } catch (e) {
       console.warn('[crawl] failed:', url, e.message);
@@ -132,6 +136,7 @@ async function buildDocsIndex() {
       records.push({ url: p.url, title: p.title, text: c });
     }
   }
+
   // Embed in batches
   const BATCH = 100;
   for (let i = 0; i < records.length; i += BATCH) {
@@ -154,7 +159,7 @@ async function retrieveDocs(query, k = 8) {
   const q = (await openai.embeddings.create({ model: EMBEDDING_MODEL, input: query })).data[0].embedding;
   return RAG_INDEX
     .map(r => ({ ...r, score: cosineSim(q, r.embedding) }))
-    .sort((a,b) => b.score - a.score)
+    .sort((a, b) => b.score - a.score)
     .slice(0, k)
     .filter(r => r.score > 0.1);
 }
@@ -184,7 +189,7 @@ async function answerFromDocs(question) {
 
   const reply = resp.choices?.[0]?.message?.content?.trim()
     || "I don’t see that in the Naviga Circulation manuals.";
-  const citations = top.slice(0,2).map(r => ({ url: r.url, title: r.title }));
+  const citations = top.slice(0, 2).map(r => ({ url: r.url, title: r.title }));
   return { reply, citations };
 }
 
@@ -196,8 +201,14 @@ app.get('/health', async (_req, res) => {
 // ---------- Docs-only endpoint ----------
 app.post('/docs-only', async (req, res) => {
   try {
+    // Optional client-sent whitelist must be a subset; ignore anything else
+    const allowedDocs = Array.isArray(req.body?.allowedDocs) ? req.body.allowedDocs : [];
+    const invalid = allowedDocs.filter(u => !DOC_BASES.some(b => u && u.startsWith(b)));
+    if (invalid.length) return res.status(403).json({ error: 'Only the two Naviga manuals are allowed.' });
+
     const question = String(req.body?.question || req.body?.message || '').trim();
     if (!question) return res.status(400).json({ error: 'Missing question' });
+
     const out = await answerFromDocs(question);
     res.json(out);
   } catch (e) {
@@ -218,6 +229,7 @@ app.post('/chat', async (req, res) => {
       return res.json({ reply: out.reply, citations: out.citations, source: 'docs-only' });
     }
 
+    // Otherwise: regular chat with short session history
     const session = pushToSession(userId, 'user', message);
     const completion = await openai.chat.completions.create({
       model: COMPLETIONS_MODEL,
@@ -233,8 +245,10 @@ app.post('/chat', async (req, res) => {
   }
 });
 
-// ---------- Start ----------
+// ---------- Root + Start ----------
+app.get('/', (_req, res) => res.send('OK'));
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
 });
+
 
