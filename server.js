@@ -11,7 +11,7 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
-// CORS: lock to your Netlify origins in prod via NETLIFY_ORIGINS env (comma-separated)
+// CORS
 app.use(cors({
   origin: (process.env.NETLIFY_ORIGINS || '')
     .split(',')
@@ -22,7 +22,7 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '1mb' }));
 
-// ---------- OpenAI ----------
+//OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const COMPLETIONS_MODEL    = process.env.MODEL || 'gpt-4o-mini';
 const EMBEDDING_MODEL      = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
@@ -41,7 +41,7 @@ function pushToSession(userId, role, content) {
   return arr;
 }
 
-// ========== DOCS-ONLY RAG (strictly the two Naviga manuals) ==========
+// DOCS-ONLY RAG 
 // Hard whitelist (server-side enforcement)
 const DOC_BASES = Object.freeze([
   'https://docs.navigaglobal.com/circulation-setup-manual',
@@ -215,12 +215,12 @@ async function answerFromDocs(question, opts = {}) {
   return { reply: sanitized, citations };
 }
 
-// ---------- Health ----------
+// Health 
 app.get('/health', async (_req, res) => {
   res.json({ ok: true, indexed: RAG_INDEX?.length || 0 });
 });
 
-// ---------- Docs-only endpoint ----------
+//  Docs-only endpoint 
 app.post('/docs-only', async (req, res) => {
   try {
     // Optional: client may send allowedDocs—we enforce server-side anyway
@@ -239,7 +239,7 @@ app.post('/docs-only', async (req, res) => {
   }
 });
 
-// ---------- Chat endpoint (kept; routes to docs-only if requested) ----------
+// Chat endpoint (kept; routes to docs-only if requested) 
 app.post('/chat', async (req, res) => {
   const { message, userId = 'default-user', mode, restrict } = req.body || {};
   try {
@@ -267,7 +267,7 @@ app.post('/chat', async (req, res) => {
   }
 });
 
-// ---------- Root + Start ----------
+//  Root + Start
 app.get('/', (_req, res) => res.send('OK'));
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
