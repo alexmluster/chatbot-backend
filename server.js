@@ -5,31 +5,29 @@ const dotenv = require('dotenv');
 const OpenAI = require('openai');     // default export in CJS
 const axios = require('axios');
 const cheerio = require('cheerio');
-const COMPLETIONS_MODEL = process.env.MODEL || 'gpt-4o-mini';
-// conversational but grounded
-const DEFAULT_TEMPERATURE = Number(process.env.TEMPERATURE ?? 0.45);
-const RESPONSE_TONE = process.env.RESPONSE_TONE || 'friendly, concise, professional';
-
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// CORS: lock Netlify origins in prod via NETLIFY_ORIGINS env (comma-separated)
+// CORS: lock to your Netlify origins in prod via NETLIFY_ORIGINS env (comma-separated)
 app.use(cors({
   origin: (process.env.NETLIFY_ORIGINS || '')
     .split(',')
     .map(s => s.trim())
-    .filter(Boolean)
-    .concat((process.env.NETLIFY_ORIGINS ? [] : [true]))[0]   // true if not set
+    .filter(Boolean).length
+      ? (process.env.NETLIFY_ORIGINS || '').split(',').map(s => s.trim())
+      : true
 }));
 app.use(express.json({ limit: '1mb' }));
 
 // ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const COMPLETIONS_MODEL = process.env.MODEL || 'gpt-4o-mini';
-const EMBEDDING_MODEL   = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
+const COMPLETIONS_MODEL    = process.env.MODEL || 'gpt-4o-mini';
+const EMBEDDING_MODEL      = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
+const DEFAULT_TEMPERATURE  = Number(process.env.TEMPERATURE ?? 0.45); // conversational but grounded
+const RESPONSE_TONE        = process.env.RESPONSE_TONE || 'friendly, concise, professional';
 
 // ---------- Basic user sessions (trimmed) ----------
 const userSessions = new Map();
@@ -43,7 +41,7 @@ function pushToSession(userId, role, content) {
   return arr;
 }
 
-// ========== DOCS-ONLY RAG (the two Naviga manuals) ==========
+// ========== DOCS-ONLY RAG (strictly the two Naviga manuals) ==========
 // Hard whitelist (server-side enforcement)
 const DOC_BASES = Object.freeze([
   'https://docs.navigaglobal.com/circulation-setup-manual',
@@ -169,33 +167,52 @@ async function retrieveDocs(query, k = 8) {
     .filter(r => r.score > 0.1);
 }
 
-async function answerFromDocs(question) {
+// ---------- Conversational, grounded answering ----------
+async function answerFromDocs(question, opts = {}) {
+  const tone = opts.tone || RESPONSE_TONE;
+
   const top = await retrieveDocs(question, 8);
   if (!top.length) {
     return { reply: "I don’t see that in the Naviga Circulation manuals.", citations: [] };
   }
-  const sources = top.map((r, i) => `# Source ${i+1} — ${r.title}\nURL: ${r.url}\n${r.text}`).join('\n\n---\n\n');
-  const sys = [
+
+  // Compact sources block. We’ll paraphrase rather than quote.
+  const sourcesBlock = top.map((r, i) => (
+    `# Source ${i+1}\nTitle: ${r.title}\nURL: ${r.url}\n---\n${r.text}`
+  )).join('\n\n==========\n\n');
+
+  const system = [
     "You are a helpful assistant for Naviga Circulation operations.",
-    "Answer ONLY using the 'Sources' text. If the sources don't answer it, say you don't see it in the manuals.",
-    "Be concise and practical. Use short steps when helpful.",
-    "End with a 'Source:' line citing 1–2 relevant URLs."
+    "Answer ONLY using the provided Sources. If they do not contain the answer, say so.",
+    `Write in a natural, conversational voice (${tone}).`,
+    "Paraphrase instead of quoting; avoid long verbatim passages.",
+    "Prefer short sentences and plain language while keeping Naviga terms accurate.",
+    "When giving procedures, use brief numbered steps.",
+    "If something depends on version/config and the Sources aren't explicit, state your assumption.",
+    "Finish with a single line like: Source: <short title> (<url>)"
   ].join(' ');
-  const user = `Question: ${question}\n\nSources:\n${sources}`;
+
+  const user = `Question: ${question}\n\nSOURCES (use only these):\n${sourcesBlock}`;
 
   const resp = await openai.chat.completions.create({
     model: COMPLETIONS_MODEL,
-    temperature: 0.2,
+    temperature: DEFAULT_TEMPERATURE, // a touch more natural, still grounded
     messages: [
-      { role: 'system', content: sys },
+      { role: 'system', content: system },
       { role: 'user', content: user }
     ]
   });
 
   const reply = resp.choices?.[0]?.message?.content?.trim()
     || "I don’t see that in the Naviga Circulation manuals.";
+
+  // Keep lightweight citations for UI
   const citations = top.slice(0, 2).map(r => ({ url: r.url, title: r.title }));
-  return { reply, citations };
+
+  // Guard against very long verbatim quotes (rare)
+  const sanitized = reply.replace(/“([^”]{60,})”/g, '“[excerpt shortened]”');
+
+  return { reply: sanitized, citations };
 }
 
 // ---------- Health ----------
@@ -206,7 +223,7 @@ app.get('/health', async (_req, res) => {
 // ---------- Docs-only endpoint ----------
 app.post('/docs-only', async (req, res) => {
   try {
-    // Optional client-sent whitelist must be a subset; ignore anything else
+    // Optional: client may send allowedDocs—we enforce server-side anyway
     const allowedDocs = Array.isArray(req.body?.allowedDocs) ? req.body.allowedDocs : [];
     const invalid = allowedDocs.filter(u => !DOC_BASES.some(b => u && u.startsWith(b)));
     if (invalid.length) return res.status(403).json({ error: 'Only the two Naviga manuals are allowed.' });
@@ -228,7 +245,7 @@ app.post('/chat', async (req, res) => {
   try {
     if (!message) return res.status(400).json({ error: 'Message is required' });
 
-    // If frontend is in kb-only mode, route to docs-only for guaranteed restriction.
+    // If frontend is in kb-only mode, guarantee restriction by using docs-only
     if (mode === 'kb-only' || restrict === 'kb+docs' || restrict === 'docs-only') {
       const out = await answerFromDocs(message);
       return res.json({ reply: out.reply, citations: out.citations, source: 'docs-only' });
@@ -255,5 +272,6 @@ app.get('/', (_req, res) => res.send('OK'));
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
 });
+
 
 
