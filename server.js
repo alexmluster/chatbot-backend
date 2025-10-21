@@ -11,7 +11,7 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
-// CORS: lock to your Netlify origins in prod via NETLIFY_ORIGINS env (comma-separated)
+// CORS: lock Netlify origins in prod via NETLIFY_ORIGINS env (comma-separated)
 app.use(cors({
   origin: (process.env.NETLIFY_ORIGINS || '')
     .split(',')
@@ -38,7 +38,7 @@ function pushToSession(userId, role, content) {
   return arr;
 }
 
-// ========== DOCS-ONLY RAG (strictly the two Naviga manuals) ==========
+// ========== DOCS-ONLY RAG (the two Naviga manuals) ==========
 // Hard whitelist (server-side enforcement)
 const DOC_BASES = Object.freeze([
   'https://docs.navigaglobal.com/circulation-setup-manual',
